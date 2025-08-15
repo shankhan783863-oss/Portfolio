@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Weather Now — Design System Kit Style</title>
+<style>
+  /* ---- Base Design System ---- */
+  :root {
+    --color-bg: #0f172a;
+    --color-card: #1e293b;
+    --color-primary: #38bdf8;
+    --color-secondary: #94a3b8;
+    --color-text: #e2e8f0;
+    --color-muted: #64748b;
+    --radius-lg: 16px;
+    --radius-sm: 8px;
+    --shadow: 0 4px 12px rgba(0,0,0,0.3);
+    --font-main: "Segoe UI", sans-serif;
+    --spacing: 1rem;
+  }
+
+  body {
+    font-family: var(--font-main);
+    background: var(--color-bg);
+    color: var(--color-text);
+    margin: 0;
+    padding: var(--spacing);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+  }
+
+  h1 {
+    font-size: 1.8rem;
+    color: var(--color-primary);
+    margin-bottom: 0.5rem;
+  }
+
+  p {
+    color: var(--color-secondary);
+    margin: 0.2rem 0;
+  }
+
+  /* ---- Card ---- */
+  .card {
+    background: var(--color-card);
+    padding: calc(var(--spacing) * 1.5);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow);
+    max-width: 320px;
+    width: 100%;
+    text-align: center;
+    margin-top: var(--spacing);
+  }
+
+  .temp {
+    font-size: 3rem;
+    font-weight: bold;
+    color: var(--color-primary);
+  }
+
+  .desc {
+    color: var(--color-secondary);
+    margin-top: 0.5rem;
+  }
+
+  .updated {
+    font-size: 0.8rem;
+    color: var(--color-muted);
+    margin-top: 0.5rem;
+  }
+
+  /* ---- Status Message ---- */
+  #status {
+    font-size: 0.9rem;
+    margin-top: 0.5rem;
+    color: var(--color-muted);
+  }
+
+  /* ---- Button ---- */
+  button {
+    background: var(--color-primary);
+    color: #0f172a;
+    border: none;
+    border-radius: var(--radius-sm);
+    padding: 0.6rem 1.2rem;
+    font-weight: bold;
+    cursor: pointer;
+    margin-top: var(--spacing);
+    transition: background 0.2s ease;
+  }
+  button:hover {
+    background: #0ea5e9;
+  }
+</style>
+</head>
+<body>
+
+<h1>☀️ Weather Now</h1>
+<p id="status">Fetching location...</p>
+
+<div class="card" id="weather-card" style="display:none;">
+  <div class="temp" id="temperature"></div>
+  <div class="desc" id="description"></div>
+  <div class="updated" id="last-updated"></div>
+</div>
+
+<button onclick="refreshWeather()">Refresh</button>
+
+<script>
+const statusEl = document.getElementById('status');
+const card = document.getElementById('weather-card');
+const tempEl = document.getElementById('temperature');
+const descEl = document.getElementById('description');
+const updatedEl = document.getElementById('last-updated');
+
+// Load cached weather if available
+const cached = localStorage.getItem('weatherData');
+if (cached) {
+  const data = JSON.parse(cached);
+  showWeather(data);
+  statusEl.textContent = "Showing last saved weather data (offline mode)";
+}
+
+// Get location
+if (navigator.geolocation) {
+  navigator.geolocation.getCurrentPosition(success, error);
+} else {
+  statusEl.textContent = "Geolocation not supported by your browser.";
+}
+
+function success(position) {
+  const lat = position.coords.latitude;
+  const lon = position.coords.longitude;
+  fetchWeather(lat, lon);
+}
+
+function error() {
+  statusEl.textContent = "Unable to retrieve location.";
+}
+
+function fetchWeather(lat, lon) {
+  statusEl.textContent = "Fetching weather...";
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true`;
+
+  fetch(url)
+    .then(res => res.json())
+    .then(data => {
+      const weather = {
+        temp: data.current_weather.temperature,
+        desc: `Wind: ${data.current_weather.windspeed} km/h`,
+        time: new Date().toLocaleTimeString()
+      };
+      localStorage.setItem('weatherData', JSON.stringify(weather));
+      showWeather(weather);
+      statusEl.textContent = "Weather updated.";
+    })
+    .catch(() => {
+      statusEl.textContent = "Failed to fetch live weather. Showing cached data.";
+    });
+}
+
+function showWeather(weather) {
+  tempEl.textContent = `${weather.temp}°C`;
+  descEl.textContent = weather.desc;
+  updatedEl.textContent = `Last updated: ${weather.time}`;
+  card.style.display = "block";
+}
+
+function refreshWeather() {
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(success, error);
+  }
+}
+</script>
+
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">

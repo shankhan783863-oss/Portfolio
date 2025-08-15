@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>AirDraw — Pinch Draw | Thumb+Middle Clear</title>
+<style>
+  :root{--bg:#071019;--panel:#0f1720;--muted:#8fa6b8;--text:#e6f2fb}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Roboto,Arial}
+  #ui{
+    position:fixed;left:12px;top:12px;z-index:999;background:linear-gradient(180deg,var(--panel),#07101a);
+    padding:12px;border-radius:10px;border:1px solid #0c2430;width:320px;box-shadow:0 10px 30px #0008;
+  }
+  #ui h2{margin:0 0 8px 0;font-size:15px}
+  .row{display:flex;gap:8px;align-items:center;margin:8px 0}
+  label{font-size:13px;color:var(--muted);min-width:68px}
+  input[type="range"]{width:150px}
+  input[type="color"]{height:32px;width:48px;padding:0;border-radius:6px;border:0}
+  button{background:#0b1220;color:var(--text);border:1px solid #10202a;padding:8px 10px;border-radius:8px;cursor:pointer}
+  button.primary{background:#59d6ff;color:#042025;font-weight:800}
+  #status{font-size:13px;color:var(--muted);margin-top:6px}
+  canvas{display:block;width:100vw;height:100vh}
+  .hint{font-size:12px;color:#9fb6c8;margin-top:8px}
+  .small{font-size:12px;color:#9fb6c8}
+  .bar{height:6px;background:#123; border-radius:4px; overflow:hidden; margin-top:8px}
+  .bar > i{display:block;height:100%;width:0;background:#59d6ff}
+</style>
+</head>
+<body>
+  <div id="ui">
+    <h2>AirDraw — Pinch Draw</h2>
+
+    <div class="row">
+      <button id="start" class="primary">Start Camera</button>
+      <button id="stop" disabled>Stop</button>
+      <button id="clearBtn">Clear</button>
+    </div>
+
+    <div class="row">
+      <label>Brush</label>
+      <input id="brush" type="range" min="2" max="80" value="18">
+      <div id="brushVal" class="small">18</div>
+    </div>
+
+    <div class="row">
+      <label>Color</label>
+      <input id="color" type="color" value="#ffffff">
+      <div style="flex:1"></div>
+    </div>
+
+    <div id="status">Status: Idle — click Start Camera</div>
+    <div class="bar" title="Cooldown progress"><i id="prog"></i></div>
+    <div class="hint">
+      Controls: pinch (thumb+index) to draw. <strong>Tap thumb+middle</strong> to clear (instant). After clear there's a 1s drawing cooldown.
+      Use Live Server (or http) so camera will work.
+    </div>
+  </div>
+
+  <video id="video" playsinline style="display:none"></video>
+  <canvas id="canvas"></canvas>
+
+  <!-- MediaPipe Hands & Camera Utils -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+<script>
+/*
+  Full AirDraw:
+  - Pinch (thumb + index) => draw
+  - Thumb + middle quick TAP (close together) => CLEAR instantly
+  - After clear: 1s cooldown where drawing is ignored
+  - Brush preview follows index fingertip (smoothed)
+  - Interpolated strokes for smooth drawing
+  - UI controls: start/stop, brush size, color, clear button, status, cooldown bar
+*/
+
+/* ---------- Tunables ---------- */
+const PINCH_ON = 0.055;        // normalized dist to engage pinch
+const PINCH_OFF = 0.09;        // normalized dist to release pinch (hysteresis)
+const SMOOTH_ALPHA = 0.55;     // smoothing for brush preview (0..1)
+const INTERP_STEPS = 4;        // interpolation steps for stroke
+const CLEAR_TAP_THRESH = 0.06; // normalized dist thumb<->middle to register a tap-clear
+const CLEAR_COOLDOWN_MS = 1000; // after clearing, ignore drawing for this time
+// --------------------------------*/
+
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d', { alpha: false });
+
+const startBtn = document.getElementById('start');
+const stopBtn  = document.getElementById('stop');
+const clearBtn = document.getElementById('clearBtn');
+const brushInput = document.getElementById('brush');
+const brushVal = document.getElementById('brushVal');
+const colorInput = document.getElementById('color');
+const statusEl = document.getElementById('status');
+const progEl = document.getElementById('prog');
+
+let hands = null, camera = null, running = false;
+let drawCanvas = document.createElement('canvas'), dctx = drawCanvas.getContext('2d', { alpha: false });
+
+// state
+let smoothX = null, smoothY = null;
+let lastDrawPoint = null;
+let isPinching = false;
+let lastPinchTime = 0;
+let lastClearTime = -9999; // timestamp when last clear happened (ms)
+let lastClearTapTime = 0;
+
+/* layout */
+function resizeAll(){
+  canvas.width = innerWidth;
+  canvas.height = innerHeight;
+  drawCanvas.width = canvas.width;
+  drawCanvas.height = canvas.height;
+  // initialize background of drawing layer
+  dctx.fillStyle = '#071018';
+  dctx.fillRect(0,0,drawCanvas.width, drawCanvas.height);
+}
+addEventListener('resize', resizeAll);
+resizeAll();
+
+/* helpers */
+function lmToCanvas(xNorm, yNorm){
+  // mirror horizontally (so user movement matches view)
+  return [ (1 - xNorm) * canvas.width, yNorm * canvas.height ];
+}
+function lerp(a,b,t){ return a + (b-a)*t; }
+function commitCircle(x,y,size,color){
+  dctx.fillStyle = color;
+  dctx.beginPath();
+  dctx.arc(x,y,size,0,Math.PI*2);
+  dctx.fill();
+}
+function drawInterpolated(a,b,steps,size,color){
+  for (let i=1;i<=steps;i++){
+    const t = i/steps;
+    const x = lerp(a[0], b[0], t);
+    const y = lerp(a[1], b[1], t);
+    commitCircle(x,y,size,color);
+  }
+}
+function now(){ return performance.now(); }
+function setStatus(s){ statusEl.textContent = 'Status: ' + s; }
+function setProg(p){ progEl.style.width = Math.max(0, Math.min(100, p*100)) + '%'; }
+
+/* main MediaPipe callback */
+function onResults(results){
+  // We don't draw the camera into persistent layer; we render mirrored camera faintly in renderLoop
+  if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0){
+    setStatus('No hand detected');
+    // keep smooth coords as last known
+    return;
+  }
+
+  const lm = results.multiHandLandmarks[0];
+
+  // index tip (8) & thumb tip (4) & middle tip (12)
+  const idx = lm[8], th = lm[4], mid = lm[12];
+
+  // smooth index -> brush preview
+  const [tx, ty] = lmToCanvas(idx.x, idx.y);
+  if (smoothX === null){ smoothX = tx; smoothY = ty; }
+  smoothX = lerp(smoothX, tx, SMOOTH_ALPHA);
+  smoothY = lerp(smoothY, ty, SMOOTH_ALPHA);
+
+  const tnow = now();
+
+  // Pinch detection for drawing (thumb + index)
+  const pinchDist = Math.hypot(idx.x - th.x, idx.y - th.y);
+  if (!isPinching && pinchDist < PINCH_ON){
+    isPinching = true;
+    lastPinchTime = tnow;
+  } else if (isPinching && pinchDist > PINCH_OFF){
+    // release pinch
+    isPinching = false;
+    lastDrawPoint = null; // prevent jump on next pinch
+  }
+
+  // Thumb + middle quick tap to clear
+  const midThumbDist = Math.hypot(mid.x - th.x, mid.y - th.y);
+  if (midThumbDist < CLEAR_TAP_THRESH){
+    // To avoid repeated multi-frame triggers, require it to be a new tap (debounce)
+    if (tnow - lastClearTapTime > 250){
+      // Only clear if not in cooldown or even if in cooldown we allow clear (cooldown applies after clear)
+      dctx.fillStyle = '#071018';
+      dctx.fillRect(0,0,drawCanvas.width, drawCanvas.height);
+      lastClearTime = tnow;
+      lastClearTapTime = tnow;
+      setStatus('Cleared (thumb+middle tap)');
+      setProg(1);
+      // start cooldown progress reduction loop; drawing will be ignored until timeout
+      setTimeout(()=> {
+        // end cooldown after CLEAR_COOLDOWN_MS
+        setProg(0);
+      }, CLEAR_COOLDOWN_MS);
+      return; // skip drawing this frame (clear takes precedence)
+    }
+  }
+
+  // if within cooldown after clear, ignore drawing
+  if (tnow - lastClearTime < CLEAR_COOLDOWN_MS){
+    setStatus('Cooldown after clear — wait');
+    return;
+  }
+
+  // Drawing when pinching
+  if (isPinching){
+    setStatus('Pinching — drawing');
+    const pt = [smoothX, smoothY];
+    const brushSize = Number(brushInput.value);
+    const color = colorInput.value;
+    if (!lastDrawPoint){
+      commitCircle(pt[0], pt[1], brushSize, color);
+      lastDrawPoint = pt;
+    } else {
+      drawInterpolated(lastDrawPoint, pt, INTERP_STEPS, brushSize, color);
+      lastDrawPoint = pt;
+    }
+  } else {
+    setStatus('Hover — not drawing');
+  }
+}
+
+/* render loop: draw mirrored video faintly, then persistent draw layer, then brush preview */
+function renderLoop(){
+  ctx.clearRect(0,0,canvas.width, canvas.height);
+
+  // faint mirrored video for spatial feedback
+  if (video && video.readyState >= 2){
+    ctx.save();
+    ctx.globalAlpha = 0.22;
+    ctx.scale(-1,1);
+    ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
+    ctx.restore();
+  }
+
+  // draw strokes
+  ctx.drawImage(drawCanvas, 0, 0);
+
+  // brush preview
+  if (smoothX !== null){
+    ctx.save();
+    ctx.fillStyle = colorInput.value;
+    ctx.beginPath();
+    ctx.arc(smoothX, smoothY, Number(brushInput.value), 0, Math.PI*2);
+    ctx.fill();
+    // small outline
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#00000055';
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // update cooldown bar if needed
+  const elapsed = now() - lastClearTime;
+  if (lastClearTime > 0 && elapsed < CLEAR_COOLDOWN_MS){
+    setProg(1 - (elapsed / CLEAR_COOLDOWN_MS));
+  } else if (lastClearTime > 0 && elapsed >= CLEAR_COOLDOWN_MS){
+    setProg(0);
+  }
+
+  requestAnimationFrame(renderLoop);
+}
+
+/* camera & hands setup */
+async function startCamera(){
+  if (running) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width:1280, height:720, facingMode:'user' }, audio:false });
+    video.srcObject = stream;
+    await video.play();
+  } catch (e){
+    alert('Camera access denied or unavailable: ' + e.message);
+    console.error(e);
+    return;
+  }
+
+  hands = new Hands({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+  });
+  hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.65,
+    minTrackingConfidence: 0.6
+  });
+  hands.onResults(onResults);
+
+  camera = new Camera(video, {
+    onFrame: async () => { await hands.send({image: video}); },
+    width: 1280, height: 720
+  });
+  camera.start();
+
+  running = true;
+  startBtn.disabled = true; stopBtn.disabled = false;
+  setStatus('Running — show your hand');
+  renderLoop();
+}
+function stopCamera(){
+  if (!running) return;
+  camera.stop();
+  const s = video.srcObject;
+  if (s) s.getTracks().forEach(t => t.stop());
+  video.srcObject = null;
+  running = false;
+  startBtn.disabled = false; stopBtn.disabled = true;
+  setStatus('Stopped');
+}
+
+/* UI hooks */
+startBtn.onclick = startCamera;
+stopBtn.onclick = stopCamera;
+clearBtn.onclick = ()=> {
+  dctx.fillStyle = '#071018';
+  dctx.fillRect(0,0,drawCanvas.width, drawCanvas.height);
+  lastClearTime = now();
+  setProg(1);
+  setTimeout(()=> setProg(0), CLEAR_COOLDOWN_MS);
+  setStatus('Cleared (button)');
+};
+
+brushInput.addEventListener('input', ()=> brushVal.textContent = brushInput.value);
+
+/* initialize draw layer background */
+dctx.fillStyle = '#071018';
+dctx.fillRect(0,0,drawCanvas.width, drawCanvas.height);
+
+// safety log
+window.addEventListener('error', e => console.error('Runtime error:', e.error || e.message));
+</script>
+</body>
+</html>

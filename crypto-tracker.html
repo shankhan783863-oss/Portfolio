@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crypto Tracker</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
+    margin: 0;
+    padding: 1rem;
+  }
+  h1 { color: #0ea5e9; }
+  input {
+    padding: 0.5rem;
+    width: 250px;
+    border-radius: 6px;
+    border: none;
+    margin-bottom: 1rem;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  th, td {
+    padding: 0.5rem;
+    text-align: left;
+  }
+  tr:nth-child(even) { background: #1e293b; }
+  button {
+    background: #0ea5e9;
+    color: white;
+    border: none;
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .pagination {
+    margin-top: 1rem;
+  }
+  canvas {
+    background: white;
+    border-radius: 8px;
+    margin-top: 1rem;
+    max-width: 600px;
+  }
+</style>
+</head>
+<body>
+<h1>📈 Crypto Tracker</h1>
+<input type="text" id="search" placeholder="Search cryptocurrency...">
+<table id="crypto-table">
+  <thead>
+    <tr>
+      <th>Coin</th>
+      <th>Price (USD)</th>
+      <th>24h Change</th>
+      <th>Chart</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+<div class="pagination">
+  <button id="prev">Prev</button>
+  <span id="page-info"></span>
+  <button id="next">Next</button>
+</div>
+<canvas id="priceChart"></canvas>
+
+<script>
+const tableBody = document.querySelector("#crypto-table tbody");
+const searchInput = document.querySelector("#search");
+const prevBtn = document.querySelector("#prev");
+const nextBtn = document.querySelector("#next");
+const pageInfo = document.querySelector("#page-info");
+const ctx = document.getElementById('priceChart').getContext('2d');
+
+let currentPage = 1;
+let perPage = 10;
+let coinsData = [];
+let chart;
+
+async function fetchCoins(page = 1) {
+  const cacheKey = `crypto-page-${page}`;
+  const cached = localStorage.getItem(cacheKey);
+  if (cached) {
+    coinsData = JSON.parse(cached);
+    renderTable(coinsData);
+    return;
+  }
+  const res = await fetch(
+    `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=${perPage}&page=${page}&sparkline=false`
+  );
+  const data = await res.json();
+  coinsData = data;
+  localStorage.setItem(cacheKey, JSON.stringify(data));
+  renderTable(data);
+}
+
+function renderTable(data) {
+  tableBody.innerHTML = "";
+  data.forEach(coin => {
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td>${coin.name}</td>
+      <td>$${coin.current_price.toLocaleString()}</td>
+      <td style="color:${coin.price_change_percentage_24h >= 0 ? 'lightgreen' : 'red'}">
+        ${coin.price_change_percentage_24h.toFixed(2)}%
+      </td>
+      <td><button onclick="loadChart('${coin.id}')">View</button></td>
+    `;
+    tableBody.appendChild(row);
+  });
+  pageInfo.textContent = `Page ${currentPage}`;
+}
+
+async function loadChart(coinId) {
+  const res = await fetch(
+    `https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=7`
+  );
+  const data = await res.json();
+  const prices = data.prices.map(p => p[1]);
+  const labels = data.prices.map((_, i) => i + 1);
+  
+  if (chart) chart.destroy();
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Price (USD)',
+        data: prices,
+        borderColor: '#0ea5e9',
+        fill: false
+      }]
+    },
+    options: { responsive: true }
+  });
+}
+
+searchInput.addEventListener("input", () => {
+  const filtered = coinsData.filter(c =>
+    c.name.toLowerCase().includes(searchInput.value.toLowerCase())
+  );
+  renderTable(filtered);
+});
+
+prevBtn.addEventListener("click", () => {
+  if (currentPage > 1) {
+    currentPage--;
+    fetchCoins(currentPage);
+  }
+});
+nextBtn.addEventListener("click", () => {
+  currentPage++;
+  fetchCoins(currentPage);
+});
+
+fetchCoins();
+</script>
+</body>
+</html>
+</code>
+<!DOCTYPE html>
